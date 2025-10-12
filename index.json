@@ -1,0 +1,600 @@
+// index.js — Bot e-sport complet (CommonJS)
+// Requires: discord.js, dotenv
+const fs = require('fs');
+const path = require('path');
+const {
+  Client,
+  GatewayIntentBits,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  EmbedBuilder,
+  ButtonBuilder,
+  ActionRowBuilder,
+  ButtonStyle,
+  PermissionsBitField,
+} = require('discord.js');
+require('dotenv').config();
+
+const TOKEN = process.env.TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
+const DATA_PATH = path.join(__dirname, 'data.json');
+const ANNOUNCE_ROLE_NAME = 'Annonce tournoi'; // role name to ping (separate message)
+
+// ---------- Data helpers ----------
+function ensureDataFile() {
+  if (!fs.existsSync(DATA_PATH)) {
+    fs.writeFileSync(DATA_PATH, JSON.stringify({ tournois: [] }, null, 2));
+  }
+}
+function loadData() {
+  ensureDataFile();
+  try {
+    const raw = fs.readFileSync(DATA_PATH, 'utf8');
+    return raw.trim() ? JSON.parse(raw) : { tournois: [] };
+  } catch (e) {
+    console.error('Erreur lecture data.json, réinitialisation', e);
+    fs.writeFileSync(DATA_PATH, JSON.stringify({ tournois: [] }, null, 2));
+    return { tournois: [] };
+  }
+}
+function saveData(db) {
+  try {
+    fs.writeFileSync(DATA_PATH, JSON.stringify(db, null, 2), 'utf8');
+  } catch (e) {
+    console.error('Erreur écriture data.json', e);
+  }
+}
+
+// ---------- Utils ----------
+function findTournament(db, name) {
+  if (!name) return null;
+  return db.tournois.find(t => t.nom.toLowerCase() === name.toLowerCase());
+}
+function generateCode(len = 6) {
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  let s = '';
+  for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+
+// ---------- Client ----------
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.DirectMessages,
+  ],
+  partials: ['CHANNEL'],
+});
+
+// ---------- Slash commands (required options first) ----------
+const commands = [
+  // ajoutertournoi (admin)
+  new SlashCommandBuilder()
+    .setName('ajoutertournoi')
+    .setDescription('➕ FR: Créer un tournoi — EN: Create a tournament (admin)')
+    .addStringOption(o => o.setName('nom').setDescription('FR: Nom / EN: Name').setRequired(true))
+    .addIntegerOption(o => o.setName('max_teams').setDescription('FR: Nombre max d\'équipes / EN: Max teams').setRequired(true))
+    .addIntegerOption(o => o.setName('players_per_team').setDescription('FR: Joueurs par équipe / EN: Players per team').setRequired(true))
+    .addStringOption(o => o.setName('categorie').setDescription('FR: Catégorie / EN: Category').setRequired(false))
+    .addStringOption(o => o.setName('niveau').setDescription('FR: Niveau / EN: Level').setRequired(false))
+    .addStringOption(o => o.setName('date').setDescription('FR: Date (ex: 2025-09-10 16:30) / EN: Date (optional)').setRequired(false))
+    .addStringOption(o => o.setName('lien').setDescription('FR: Lien (optionnel) / EN: Link (optional)').setRequired(false))
+    .toJSON(),
+
+  // listetournois
+  new SlashCommandBuilder()
+    .setName('listetournois')
+    .setDescription('📋 FR/EN: Lister tous les tournois / List tournaments')
+    .toJSON(),
+
+  // detailtournoi
+  new SlashCommandBuilder()
+    .setName('detailtournoi')
+    .setDescription('🔍 FR/EN: Détails d\'un tournoi / Tournament details')
+    .addStringOption(o => o.setName('tournoi').setDescription('FR: Nom du tournoi / EN: Tournament name').setRequired(true))
+    .toJSON(),
+
+  // ajouterequipe
+  new SlashCommandBuilder()
+    .setName('ajouterequipe')
+    .setDescription('👥 FR/EN: Créer une équipe (chef) avec mot de passe / Create team with password')
+    .addStringOption(o => o.setName('tournoi').setDescription('FR: Nom du tournoi / EN: Tournament name').setRequired(true))
+    .addStringOption(o => o.setName('nom').setDescription('FR: Nom de l\'équipe / EN: Team name').setRequired(true))
+    .addStringOption(o => o.setName('motdepasse').setDescription('FR: Mot de passe / EN: Password').setRequired(true))
+    .toJSON(),
+
+  // inscriptionauto (admin posts button)
+  new SlashCommandBuilder()
+    .setName('inscriptionauto')
+    .setDescription('🟢 FR/EN: Ouvrir les inscriptions (admin) / Open signups (admin)')
+    .addStringOption(o => o.setName('tournoi').setDescription('FR: Nom du tournoi / EN: Tournament name').setRequired(true))
+    .toJSON(),
+
+  // listeinscriptions
+  new SlashCommandBuilder()
+    .setName('listeinscriptions')
+    .setDescription('📜 FR/EN: Voir les inscriptions (admin/creator) / List registrations')
+    .addStringOption(o => o.setName('tournoi').setDescription('FR: Nom du tournoi / EN: Tournament name').setRequired(true))
+    .toJSON(),
+
+  // supprimerequipe (starts DM password flow)
+  new SlashCommandBuilder()
+    .setName('supprimerequipe')
+    .setDescription('🗑️ FR/EN: Supprimer une équipe (mot de passe en DM) / Delete team (password via DM)')
+    .addStringOption(o => o.setName('tournoi').setDescription('FR: Nom du tournoi / EN: Tournament name').setRequired(true))
+    .addStringOption(o => o.setName('equipe').setDescription('FR: Nom de l\'équipe / EN: Team name').setRequired(true))
+    .toJSON(),
+
+  // supprimertournoi (admin)
+  new SlashCommandBuilder()
+    .setName('supprimertournoi')
+    .setDescription('🗑️ FR/EN: Supprimer un tournoi (admin) / Delete a tournament (admin)')
+    .addStringOption(o => o.setName('nom').setDescription('FR: Nom du tournoi / EN: Tournament name').setRequired(true))
+    .toJSON(),
+
+  // announcetournoi (admin -> ping role + embed)
+  new SlashCommandBuilder()
+    .setName('annoncetournoi')
+    .setDescription('📢 FR/EN: Annoncer un tournoi (admin) / Announce a tournament (admin)')
+    .addStringOption(o => o.setName('tournoi').setDescription('FR: Nom du tournoi / EN: Tournament name').setRequired(true))
+    .toJSON(),
+
+  // help
+  new SlashCommandBuilder()
+    .setName('help')
+    .setDescription('📖 FR/EN: Aide / Help')
+    .toJSON(),
+];
+
+// Register commands to GUILD only (instant)
+const rest = new REST({ version: '10' }).setToken(TOKEN);
+(async () => {
+  try {
+    console.log('Enregistrement des commandes (guild)...');
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+    console.log('✅ Commandes enregistrées sur le serveur.');
+  } catch (err) {
+    console.error('Erreur enregistrement commandes:', err);
+  }
+})();
+
+// ---------- Interaction handler ----------
+client.on('interactionCreate', async (interaction) => {
+  try {
+    // Button clicks handling (inscription button)
+    if (interaction.isButton && interaction.isButton()) {
+      const custom = interaction.customId; // inscription::<encodedTournamentName>
+      if (custom && custom.startsWith('inscription::')) {
+        const tournoiNom = decodeURIComponent(custom.split('::')[1]);
+        return handleInscriptionClick(interaction, tournoiNom);
+      }
+      return;
+    }
+
+    if (!interaction.isChatInputCommand()) return;
+
+    const db = loadData();
+    const cmd = interaction.commandName;
+
+    // ---------- /ajoutertournoi ----------
+    if (cmd === 'ajoutertournoi') {
+      // admin only
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
+        return interaction.reply({ ephemeral: true, content: '🚫 FR: Tu dois être admin pour créer un tournoi.\nEN: You must be an admin to create a tournament.' });
+      }
+
+      const nom = interaction.options.getString('nom').trim();
+      const maxTeams = interaction.options.getInteger('max_teams');
+      const playersPerTeam = interaction.options.getInteger('players_per_team');
+      const categorie = interaction.options.getString('categorie') || '—';
+      const niveau = interaction.options.getString('niveau') || '—';
+      const date = interaction.options.getString('date') || '—';
+      const lien = interaction.options.getString('lien') || '—';
+
+      if (findTournament(db, nom)) {
+        return interaction.reply({ ephemeral: true, content: `❌ FR: Le tournoi "${nom}" existe déjà.\nEN: Tournament "${nom}" already exists.` });
+      }
+
+      const tournoi = {
+        nom,
+        categorie,
+        niveau,
+        date,
+        lien,
+        max_teams: maxTeams,
+        players_per_team: playersPerTeam,
+        inscriptions: [], // equipe objects
+        creatorTag: interaction.user.tag,
+        creatorId: interaction.user.id,
+        createdAt: new Date().toISOString(),
+      };
+
+      db.tournois.push(tournoi);
+      saveData(db);
+
+      const emb = new EmbedBuilder()
+        .setTitle('🏆 FR: Tournoi créé — EN: Tournament created')
+        .setColor('#0b57a4')
+        .addFields(
+          { name: '📛 FR/EN Nom / Name', value: nom, inline: true },
+          { name: '📅 FR/EN Date / Date', value: date, inline: true },
+          { name: '🎮 FR/EN Catégorie / Category', value: categorie, inline: true },
+          { name: '🏅 FR/EN Niveau / Level', value: niveau, inline: true },
+          { name: '🧾 FR/EN Max équipes / Max teams', value: String(maxTeams), inline: true },
+          { name: '👥 FR/EN Joueurs / équipe / Players per team', value: String(playersPerTeam), inline: true },
+          { name: '🔗 FR/EN Lien / Link', value: lien, inline: false }
+        )
+        .setFooter({ text: `FR: Créé par ${interaction.user.tag} • EN: Created by ${interaction.user.tag}` });
+      return interaction.reply({ embeds: [emb] });
+    }
+
+    // ---------- /listetournois ----------
+    if (cmd === 'listetournois') {
+      if (!db.tournois.length) {
+        return interaction.reply({ ephemeral: true, content: '📭 FR: Aucun tournoi enregistré. / EN: No tournaments registered.' });
+      }
+
+      // send one announcement + embed per tournament (ping role first in separate message)
+      for (const tournoi of db.tournois) {
+        // try to find role by name
+        let roleMention = `@${ANNOUNCE_ROLE_NAME}`;
+        try {
+          const guild = await client.guilds.fetch(GUILD_ID);
+          const g = await guild.fetch();
+          const role = g.roles.cache.find(r => r.name === ANNOUNCE_ROLE_NAME);
+          if (role) roleMention = `<@&${role.id}>`;
+        } catch (e) {
+          // fallback to plain text
+        }
+
+        // send role ping as separate message (so ping is notified)
+        try {
+          await interaction.channel.send({ content: `${roleMention}` });
+        } catch (e) {
+          // ignore if can't send
+        }
+
+        // build embed (bilingual)
+        const teamsSummary = `${tournoi.inscriptions.length}/${tournoi.max_teams}`;
+        const dateText = tournoi.date || '—';
+        const emb = new EmbedBuilder()
+          .setTitle(`📅 ${tournoi.nom}`)
+          .setColor('#00AAFF')
+          .setDescription(
+            `**FR**\n🔹 Nom: ${tournoi.nom}\n🔹 Date: ${dateText}\n🔹 Catégorie: ${tournoi.categorie}\n🔹 Niveau: ${tournoi.niveau}\n🔹 Équipes: ${teamsSummary}\n🔹 Lien: ${tournoi.lien || '—'}\n\n**EN**\n🔹 Name: ${tournoi.nom}\n🔹 Date: ${dateText}\n🔹 Category: ${tournoi.categorie}\n🔹 Level: ${tournoi.niveau}\n🔹 Teams: ${teamsSummary}\n🔹 Link: ${tournoi.lien || '—'}`
+          )
+          .setFooter({ text: 'FR: Annonce automatique • EN: Auto announcement' })
+          .setTimestamp();
+        try {
+          await interaction.channel.send({ embeds: [emb] });
+        } catch (e) {
+          console.warn('Impossible d\'envoyer embed listetournois:', e);
+        }
+      }
+
+      return interaction.reply({ ephemeral: true, content: '✅ FR: Liste envoyée. / EN: List posted.' });
+    }
+
+    // ---------- /detailtournoi ----------
+    if (cmd === 'detailtournoi') {
+      const tournoiNom = interaction.options.getString('tournoi').trim();
+      const tournoi = findTournament(db, tournoiNom);
+      if (!tournoi) return interaction.reply({ ephemeral: true, content: `❌ FR: Tournoi "${tournoiNom}" introuvable.\nEN: Tournament "${tournoiNom}" not found.` });
+
+      const teams = tournoi.inscriptions.length ? tournoi.inscriptions.map(e => `• ${e.equipe} — ${e.membres.length}/${tournoi.players_per_team} membres`).join('\n') : '—';
+      const emb = new EmbedBuilder()
+        .setTitle(`📌 ${tournoi.nom}`)
+        .setColor('#c0843a')
+        .addFields(
+          { name: '🎮 FR/EN Catégorie / Category', value: tournoi.categorie || '—', inline: true },
+          { name: '🧾 FR/EN Max équipes / Max teams', value: String(tournoi.max_teams), inline: true },
+          { name: '👥 FR/EN Joueurs / équipe / Players per team', value: String(tournoi.players_per_team), inline: true },
+          { name: '📜 FR/EN Équipes / Teams (aperçu)', value: teams, inline: false }
+        );
+      return interaction.reply({ embeds: [emb] });
+    }
+
+    // ---------- /ajouterequipe ----------
+    if (cmd === 'ajouterequipe') {
+      const tournoiNom = interaction.options.getString('tournoi').trim();
+      const nomEquipe = interaction.options.getString('nom').trim();
+      const motdepasse = interaction.options.getString('motdepasse').trim();
+      const tournoi = findTournament(db, tournoiNom);
+      if (!tournoi) return interaction.reply({ ephemeral: true, content: '❌ FR: Tournoi introuvable. / EN: Tournament not found.' });
+
+      if (tournoi.inscriptions.length >= tournoi.max_teams) {
+        return interaction.reply({ ephemeral: true, content: `❌ FR: Capacité d'équipes atteinte (${tournoi.max_teams}).\nEN: Max teams reached (${tournoi.max_teams}).` });
+      }
+      if (tournoi.inscriptions.some(e => e.equipe.toLowerCase() === nomEquipe.toLowerCase())) {
+        return interaction.reply({ ephemeral: true, content: '❌ FR: Une équipe avec ce nom existe déjà.\nEN: A team with this name already exists.' });
+      }
+
+      const equipe = {
+        equipe: nomEquipe,
+        motdepasse,
+        membres: [],
+        ownerTag: interaction.user.tag,
+        ownerId: interaction.user.id,
+        createdAt: new Date().toISOString(),
+      };
+      tournoi.inscriptions.push(equipe);
+      saveData(db);
+
+      const emb = new EmbedBuilder()
+        .setTitle('👥 FR/EN Équipe créée / Team created')
+        .setColor('#155e75')
+        .setDescription(`FR: Équipe **${nomEquipe}** créée pour ${tournoi.nom}.\nEN: Team **${nomEquipe}** created for ${tournoi.nom}.`)
+        .setFooter({ text: 'FR: Mot de passe enregistré • EN: Password stored (do not share)' });
+      return interaction.reply({ embeds: [emb], ephemeral: true });
+    }
+
+    // ---------- /inscriptionauto ----------
+    if (cmd === 'inscriptionauto') {
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
+        return interaction.reply({ ephemeral: true, content: '🚫 FR: Seuls les admins peuvent ouvrir les inscriptions.\nEN: Only admins can open signups.' });
+      }
+      const tournoiNom = interaction.options.getString('tournoi').trim();
+      const tournoi = findTournament(db, tournoiNom);
+      if (!tournoi) return interaction.reply({ ephemeral: true, content: '❌ FR: Tournoi introuvable.\nEN: Tournament not found.' });
+
+      const emb = new EmbedBuilder()
+        .setTitle(`🟢 FR: Inscriptions ouvertes — ${tournoi.nom}\nEN: Signups open — ${tournoi.nom}`)
+        .setDescription(`FR: Clique sur S'inscrire pour recevoir le formulaire en DM.\nEN: Click Register to receive the form in DM.\n\n🎮 ${tournoi.categorie || '—'} • 👥 ${tournoi.players_per_team} joueurs / équipe • 🧾 max équipes: ${tournoi.max_teams}`)
+        .setColor('#0b8940');
+
+      const btn = new ButtonBuilder()
+        .setCustomId(`inscription::${encodeURIComponent(tournoi.nom)}`)
+        .setLabel("S'inscrire / Register")
+        .setStyle(ButtonStyle.Primary);
+
+      const row = new ActionRowBuilder().addComponents(btn);
+      await interaction.reply({ embeds: [emb], components: [row] });
+      return;
+    }
+
+    // ---------- /listeinscriptions ----------
+    if (cmd === 'listeinscriptions') {
+      const tournoiNom = interaction.options.getString('tournoi').trim();
+      const tournoi = findTournament(db, tournoiNom);
+      if (!tournoi) return interaction.reply({ ephemeral: true, content: '❌ FR: Tournoi introuvable.\nEN: Tournament not found.' });
+
+      const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild);
+      if (!isAdmin && interaction.user.id !== tournoi.creatorId) {
+        return interaction.reply({ ephemeral: true, content: '🚫 FR: Seuls l\'admin ou le créateur peuvent voir cette liste.\nEN: Only admin or creator can view this list.' });
+      }
+
+      const lines = tournoi.inscriptions.length
+        ? tournoi.inscriptions.map(e => {
+            const membres = e.membres.length ? e.membres.map(m => `${m.pseudo} (${m.userId ? `<@${m.userId}>` : 'no id'})`).join(', ') : '—';
+            return `**${e.equipe}** — ${membres}`;
+          }).join('\n\n')
+        : '—';
+
+      const emb = new EmbedBuilder()
+        .setTitle(`📜 FR/EN Inscriptions — ${tournoi.nom}`)
+        .setDescription(lines)
+        .setColor('#00c46c');
+      return interaction.reply({ embeds: [emb], ephemeral: true });
+    }
+
+    // ---------- /supprimerequipe (DM password flow) ----------
+    if (cmd === 'supprimerequipe') {
+      const tournoiNom = interaction.options.getString('tournoi').trim();
+      const equipeName = interaction.options.getString('equipe').trim();
+      const tournoi = findTournament(db, tournoiNom);
+      if (!tournoi) return interaction.reply({ ephemeral: true, content: '❌ FR: Tournoi introuvable.\nEN: Tournament not found.' });
+
+      const team = tournoi.inscriptions.find(e => e.equipe.toLowerCase() === equipeName.toLowerCase());
+      if (!team) return interaction.reply({ ephemeral: true, content: '❌ FR: Équipe introuvable.\nEN: Team not found.' });
+
+      try {
+        const dm = await interaction.user.createDM();
+        await dm.send({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle('🔒 FR/EN Suppression d\'équipe / Team deletion')
+              .setDescription(`FR: Tu as demandé la suppression de l'équipe **${team.equipe}** dans ${tournoi.nom}.\nEN: You requested to delete team **${team.equipe}** for ${tournoi.nom}.\n\nFR: Réponds avec le mot de passe de l'équipe.\nEN: Reply with the team password.`)
+              .setColor('#d97706'),
+          ],
+        });
+
+        const filter = (m) => m.author.id === interaction.user.id;
+        const collected = await dm.awaitMessages({ filter, max: 1, time: 120000, errors: ['time'] });
+        const answer = collected.first().content.trim();
+
+        if (answer !== team.motdepasse) {
+          await dm.send('❌ FR: Mot de passe incorrect. / EN: Incorrect password.');
+          return interaction.reply({ ephemeral: true, content: '❌ FR: Mot de passe incorrect envoyé en DM. / EN: Incorrect password (sent to your DM).' });
+        }
+
+        // delete team
+        const idx = tournoi.inscriptions.findIndex(e => e.equipe.toLowerCase() === equipeName.toLowerCase());
+        if (idx === -1) {
+          await dm.send('❌ FR: Équipe introuvable (déjà supprimée). / EN: Team not found (maybe already removed).');
+          return interaction.reply({ ephemeral: true, content: '❌ FR: Équipe introuvable. / EN: Team not found.' });
+        }
+        const removed = tournoi.inscriptions.splice(idx, 1)[0];
+        saveData(db);
+
+        await dm.send({ embeds: [new EmbedBuilder().setTitle('✅ FR/EN Équipe supprimée / Team deleted').setDescription(`FR: L'équipe **${removed.equipe}** a été supprimée.\nEN: Team **${removed.equipe}** has been deleted.`).setColor('#0b8940')] });
+
+        // public confirmation
+        try {
+          await interaction.channel.send({ embeds: [new EmbedBuilder().setTitle('🗑️ FR/EN Équipe supprimée / Team deleted').setDescription(`FR: ${interaction.user.tag} a supprimé l'équipe **${removed.equipe}** du tournoi **${tournoi.nom}**.\nEN: ${interaction.user.tag} deleted team **${removed.equipe}** from tournament **${tournoi.nom}**.`).setColor('#b91c1c')] });
+        } catch (e) {
+          // ignore
+        }
+
+        return interaction.reply({ ephemeral: true, content: '✅ FR: Suppression effectuée. / EN: Deletion completed.' });
+      } catch (e) {
+        console.error('Erreur DM supprimerequipe:', e);
+        return interaction.reply({ ephemeral: true, content: '⚠️ FR: Impossible d\'ouvrir les DM. / EN: Unable to open DMs.' });
+      }
+    }
+
+    // ---------- /supprimertournoi ----------
+    if (cmd === 'supprimertournoi') {
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
+        return interaction.reply({ ephemeral: true, content: '🚫 FR: Tu dois être admin pour supprimer un tournoi.\nEN: You must be an admin to delete a tournament.' });
+      }
+      const nom = interaction.options.getString('nom').trim();
+      const idx = db.tournois.findIndex(t => t.nom.toLowerCase() === nom.toLowerCase());
+      if (idx === -1) return interaction.reply({ ephemeral: true, content: `❌ FR: Aucun tournoi nommé "${nom}" trouvé.\nEN: No tournament named "${nom}" found.` });
+
+      const removed = db.tournois.splice(idx, 1)[0];
+      saveData(db);
+      const emb = new EmbedBuilder()
+        .setTitle('🗑️ FR/EN Tournoi supprimé / Tournament deleted')
+        .setDescription(`FR: Le tournoi **${removed.nom}** a été supprimé.\nEN: Tournament **${removed.nom}** has been deleted.`)
+        .setColor('#b91c1c');
+      return interaction.reply({ embeds: [emb] });
+    }
+
+    // ---------- /annoncetournoi ----------
+    if (cmd === 'annoncetournoi') {
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
+        return interaction.reply({ ephemeral: true, content: '🚫 FR: Tu dois être admin pour annoncer un tournoi.\nEN: You must be an admin to announce a tournament.' });
+      }
+      const tournoiNom = interaction.options.getString('tournoi').trim();
+      const tournoi = findTournament(db, tournoiNom);
+      if (!tournoi) return interaction.reply({ ephemeral: true, content: '❌ FR: Tournoi introuvable.\nEN: Tournament not found.' });
+
+      // find role
+      let roleMention = `@${ANNOUNCE_ROLE_NAME}`;
+      try {
+        const guild = await client.guilds.fetch(GUILD_ID);
+        const g = await guild.fetch();
+        const role = g.roles.cache.find(r => r.name === ANNOUNCE_ROLE_NAME);
+        if (role) roleMention = `<@&${role.id}>`;
+      } catch (e) { /* ignore */ }
+
+      // send ping first
+      try {
+        await interaction.channel.send({ content: `${roleMention}` });
+      } catch (e) { /* ignore */ }
+
+      const emb = new EmbedBuilder()
+        .setTitle(`📢 FR/EN Annonce — ${tournoi.nom}`)
+        .setDescription(`FR: ${tournoi.nom} — ${tournoi.date || '—'} — ${tournoi.categorie || '—'} — ${tournoi.niveau || '—'}\nEN: ${tournoi.nom} — ${tournoi.date || '—'} — ${tournoi.categorie || '—'} — ${tournoi.niveau || '—'}`)
+        .setColor('#FFD700');
+      return interaction.reply({ embeds: [emb], ephemeral: true });
+    }
+
+    // ---------- /help ----------
+    if (cmd === 'help') {
+      const emb = new EmbedBuilder()
+        .setTitle('📖 FR/EN Aide — Help')
+        .setColor('#5865F2')
+        .setDescription('FR: Liste des commandes disponibles\nEN: List of available commands')
+        .addFields(
+          { name: 'Public', value: '/listetournois, /detailtournoi', inline: true },
+          { name: 'Équipes/inscriptions', value: '/ajouterequipe, /inscriptionauto, /supprimerequipe (mot de passe en DM)', inline: true },
+          { name: 'Admin', value: '/ajoutertournoi, /supprimertournoi, /listeinscriptions, /annoncetournoi', inline: false }
+        );
+      return interaction.reply({ embeds: [emb], ephemeral: true });
+    }
+
+    // fallback
+    return interaction.reply({ ephemeral: true, content: '❌ FR/EN: Commande inconnue / Unknown command.' });
+  } catch (err) {
+    console.error('Erreur interaction:', err);
+    if (interaction && !interaction.replied) {
+      try { await interaction.reply({ ephemeral: true, content: '❌ FR: Erreur interne. / EN: Internal error.' }); } catch {}
+    }
+  }
+});
+
+// ---------- Handle registration button click (inscription) ----------
+async function handleInscriptionClick(buttonInteraction, tournoiNom) {
+  await buttonInteraction.deferReply({ ephemeral: true }).catch(() => { });
+  const db = loadData();
+  const tournoi = findTournament(db, tournoiNom);
+  if (!tournoi) return buttonInteraction.followUp({ ephemeral: true, content: '❌ FR/EN: Tournoi introuvable. / Tournament not found.' });
+
+  // open DM
+  let dm;
+  try {
+    dm = await buttonInteraction.user.createDM();
+  } catch (e) {
+    return buttonInteraction.followUp({ ephemeral: true, content: '⚠️ FR/EN: Impossible d\'ouvrir tes DM. / Unable to open your DMs.' });
+  }
+
+  // helper ask
+  const ask = async (prompt, timeout = 120000) => {
+    await dm.send(prompt);
+    const filter = m => m.author.id === buttonInteraction.user.id;
+    try {
+      const collected = await dm.awaitMessages({ filter, max: 1, time: timeout, errors: ['time'] });
+      return collected.first().content.trim();
+    } catch {
+      await dm.send('⏱️ FR/EN: Temps écoulé. / Time expired.');
+      throw new Error('timeout');
+    }
+  };
+
+  try {
+    await dm.send({ embeds: [new EmbedBuilder().setTitle(`Inscription — ${tournoi.nom}`).setDescription('FR: Réponds aux questions suivantes dans ce DM.\nEN: Answer the following questions in this DM.').setColor('#0b6fb0')] });
+
+    const pseudo = await ask('🔹 FR: Quel pseudo veux-tu utiliser ?\nEN: What nickname do you want to use?');
+    const equipeName = await ask('🔹 FR: Quel est le nom de ton équipe ? (exactement)\nEN: What is your team name? (exact match)');
+    const motdepasse = await ask('🔹 FR: Entre le mot de passe de l\'équipe (fourni par le chef)\nEN: Enter the team password (provided by team leader)');
+
+    // verify team exists
+    const team = tournoi.inscriptions.find(e => e.equipe.toLowerCase() === equipeName.toLowerCase());
+    if (!team) {
+      await dm.send(`❌ FR: Équipe "${equipeName}" introuvable dans ${tournoi.nom}.\nEN: Team "${equipeName}" not found in ${tournoi.nom}.`);
+      return buttonInteraction.followUp({ ephemeral: true, content: '❌ FR: Équipe introuvable. / EN: Team not found.' });
+    }
+
+    // verify password
+    if (team.motdepasse !== motdepasse) {
+      await dm.send('❌ FR: Mot de passe incorrect. / EN: Incorrect password.');
+      return buttonInteraction.followUp({ ephemeral: true, content: '❌ FR: Mot de passe incorrect. / EN: Incorrect password.' });
+    }
+
+    // check capacity
+    if (team.membres.length >= tournoi.players_per_team) {
+      await dm.send(`❌ FR: L'équipe "${team.equipe}" est complète (${tournoi.players_per_team}).\nEN: Team "${team.equipe}" is full (${tournoi.players_per_team}).`);
+      return buttonInteraction.followUp({ ephemeral: true, content: '❌ FR: Équipe complète. / EN: Team full.' });
+    }
+
+    // add member
+    const newMember = { pseudo, userId: buttonInteraction.user.id, registeredAt: new Date().toISOString() };
+    team.membres.push(newMember);
+    saveData(db);
+
+    // DM confirmation
+    await dm.send({ embeds: [new EmbedBuilder().setTitle('✅ FR/EN Inscription validée / Registration confirmed').setDescription(`FR: Tu es inscrit(e) dans **${team.equipe}** pour **${tournoi.nom}**.\nEN: You are registered in **${team.equipe}** for **${tournoi.nom}.**`).setColor('#00c46c')] });
+
+    // Public confirmation in the channel where button was clicked
+    try {
+      const channel = buttonInteraction.channel;
+      const pub = new EmbedBuilder()
+        .setTitle('🟢 FR/EN Nouvelle inscription / New registration')
+        .setDescription(`FR: ${buttonInteraction.user.tag} s'est inscrit(e) dans **${team.equipe}** pour **${tournoi.nom}**.\nEN: ${buttonInteraction.user.tag} registered in **${team.equipe}** for **${tournoi.nom}**.`)
+        .setColor('#0b8940')
+        .setTimestamp();
+      await channel.send({ embeds: [pub] });
+    } catch (e) {
+      console.warn('Impossible d\'envoyer la confirmation publique:', e);
+    }
+
+    return buttonInteraction.followUp({ ephemeral: true, content: '✅ FR: Inscription enregistrée. / EN: Registration saved. Check your DMs.' });
+  } catch (err) {
+    if (err.message === 'timeout') {
+      return buttonInteraction.followUp({ ephemeral: true, content: '⏱️ FR: Inscription annulée (temps écoulé). / EN: Registration canceled (time out).' });
+    }
+    console.error('Erreur inscription DM:', err);
+    return buttonInteraction.followUp({ ephemeral: true, content: '❌ FR: Erreur lors de l\'inscription. / EN: Error during registration.' });
+  }
+}
+
+// ---------- Startup ----------
+client.once('clientReady', () => {
+  console.log(`✅ Connecté en tant que ${client.user.tag}`);
+});
+client.login(TOKEN);

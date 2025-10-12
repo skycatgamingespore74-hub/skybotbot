@@ -1,0 +1,11 @@
+{
+  "tournois": [
+    {
+      "nom": "sky",
+      "categorie": "starter",
+      "lien": "matcherino.com",
+      "joueurs": 3,
+      "equipes": []
+    }
+  ]
+}
