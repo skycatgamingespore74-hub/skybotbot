@@ -1,12 +1,12 @@
 // reset-all-commands-safe.js
-import { REST, Routes } from 'discord.js';
-import 'dotenv/config';
+const { REST, Routes } = import('discord.js');
+require('dotenv').config();
 
-const TOKEN = process.env.TOKEN;
+const DISCORD_TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
-const rest = new REST({ version: '10' }).setToken(TOKEN);
+const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
 (async () => {
   try {
