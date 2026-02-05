@@ -19,10 +19,19 @@ expertMode = true
 [workflows]
 
 [[workflows.workflow]]
-name = "Réservée commandName "
+name = "Reset commandName"
 mode = "sequential"
 author = 48402058
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "node reset-commands.js"
+
+[[workflows.workflow]]
+name = "add commandName "
+mode = "sequential"
+author = 48402058
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "node deploy-commands.js"

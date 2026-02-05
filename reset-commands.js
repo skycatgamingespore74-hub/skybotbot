@@ -1,12 +1,12 @@
-// reset-all-commands-safe.js
-const { REST, Routes } = import('discord.js');
-require('dotenv').config();
+import 'dotenv/config';
+import { REST, Routes } from 'discord.js';
+import process from 'process';
 
-const DISCORD_TOKEN = process.env.TOKEN;
+const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 
-const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 (async () => {
   try {
@@ -18,7 +18,6 @@ const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
         console.log(`⚠️ Commande "${cmd.name}" ignorée (Entry Point Discord).`);
         continue;
       }
-
       console.log(`🗑️ Suppression de la commande globale "${cmd.name}"...`);
       await rest.delete(`${Routes.applicationCommands(CLIENT_ID)}/${cmd.id}`);
     }
