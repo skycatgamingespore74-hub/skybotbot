@@ -1,22 +1,3 @@
 {
-  "tournois": {
-    "v": {
-      "nom": "v",
-      "date": "gv",
-      "lien": "https://ghg",
-      "maxJoueurs": 4,
-      "niveau": "Argent",
-      "equipes": {
-        "v": {
-          "password": "v",
-          "chefId": "1340907519815450704",
-          "chefTag": "acesky_esport#0",
-          "joueurs": [
-            "acesky_esport#0"
-          ],
-          "maxJoueurs": 4
-        }
-      }
-    }
-  }
+  "tournois": {}
 }
